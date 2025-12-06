@@ -5,8 +5,8 @@ metadata:
   namespace: taskify
 type: Opaque
 stringData:
-  SA_PASSWORD: "Taskify123!"     # SQL Server SA password
-  DB_PASSWORD: "Taskify123!"     # Exposed to backend as DB_PASSWORD
+  SA_PASSWORD: "Taskify123!"
+  DB_PASSWORD: "Taskify123!"
 
 ---
 apiVersion: v1
@@ -37,6 +37,8 @@ spec:
       labels:
         app: mssql
     spec:
+      securityContext:
+        fsGroup: 10001        # group ID used by SQL Server container
       containers:
         - name: mssql
           image: mcr.microsoft.com/mssql/server:2019-latest
