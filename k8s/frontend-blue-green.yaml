@@ -19,23 +19,22 @@ spec:
         - name: frontend
           image: myregtf.azurecr.io/taskify-frontend:${IMAGE_TAG}
           ports:
-            - containerPort: 3000
+            - containerPort: 80
           env:
             - name: REACT_APP_API_BASE_URL
               value: http://taskify-backend.taskify.svc.cluster.local:5000
           readinessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: 80
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: 80
             initialDelaySeconds: 30
             periodSeconds: 10
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -58,23 +57,22 @@ spec:
         - name: frontend
           image: myregtf.azurecr.io/taskify-frontend:${IMAGE_TAG}
           ports:
-            - containerPort: 3000
+            - containerPort: 80
           env:
             - name: REACT_APP_API_BASE_URL
               value: http://taskify-backend.taskify.svc.cluster.local:5000
           readinessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: 80
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: 80
             initialDelaySeconds: 30
             periodSeconds: 10
-
 ---
 apiVersion: v1
 kind: Service
@@ -85,7 +83,7 @@ spec:
   type: LoadBalancer
   selector:
     app: taskify-frontend
-    color: blue   # initial live color
+    color: blue
   ports:
     - port: 80
-      targetPort: 3000
+      targetPort: 80
