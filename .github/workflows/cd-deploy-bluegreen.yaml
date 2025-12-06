@@ -15,6 +15,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      
+    env:
+      K8S_NAMESPACE: taskify
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - name: Checkout
