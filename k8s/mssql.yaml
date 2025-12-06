@@ -6,7 +6,9 @@ metadata:
 type: Opaque
 stringData:
   SA_PASSWORD: "Taskify123!"
+  DB_USER: "taskify_user"
   DB_PASSWORD: "Taskify123!"
+  DB_DATABASE: "taskify_db"
 
 ---
 apiVersion: v1
