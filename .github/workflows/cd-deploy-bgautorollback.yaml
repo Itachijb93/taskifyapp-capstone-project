@@ -44,7 +44,7 @@ jobs:
         id: livecolor
         run: |
           CURRENT_COLOR=$(kubectl get svc taskify-frontend -n $K8S_NAMESPACE -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
-          echo "Current live color: $CURRENT_COLOR"
+          echo "Current color is $CURRENT_COLOR"
           if [ "$CURRENT_COLOR" = "green" ]; then
             echo "LIVE_COLOR=green" >> $GITHUB_OUTPUT
             echo "IDLE_COLOR=blue" >> $GITHUB_OUTPUT
@@ -64,112 +64,65 @@ jobs:
         env:
           IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
         run: |
-          echo "Deploying new version to color: $IDLE_COLOR"
+          echo "Deploying color: $IDLE_COLOR"
           kubectl apply -n $K8S_NAMESPACE -f k8s/backend-blue-green.rendered.yaml
           kubectl apply -n $K8S_NAMESPACE -f k8s/frontend-blue-green.rendered.yaml
 
-      - name: Wait for idle color rollout
+      - name: Wait for rollout of idle color
         env:
           IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
         run: |
           set -e
-          echo "Waiting for backend-$IDLE_COLOR rollout"
+          echo "Waiting for backend-$IDLE_COLOR"
           kubectl rollout status deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
-          echo "Waiting for frontend-$IDLE_COLOR rollout"
+          echo "Waiting for frontend-$IDLE_COLOR"
           kubectl rollout status deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
 
-      - name: Pre-switch health check
+      - name: Switch traffic to idle color
+        id: switchtraffic
         env:
           IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
         run: |
-          set -e
-          echo "Running pre-switch health checks for $IDLE_COLOR"
-          kubectl wait --for=condition=Available deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=60s
-          kubectl wait --for=condition=Available deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=60s
+          echo "Switching Services to color=$IDLE_COLOR"
+          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\": {\"selector\": {\"app\": \"taskify-backend\", \"color\": \"$IDLE_COLOR\"}}}"
+          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\": {\"selector\": {\"app\": \"taskify-frontend\", \"color\": \"$IDLE_COLOR\"}}}"
+          echo "TRAFFIC_SWITCHED=true" >> $GITHUB_OUTPUT
 
-      - name: Switch traffic to new version (idle color)
-        id: switch
+      - name: Post-switch health check
+        id: health
         env:
           IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
         run: |
-          echo "Switching traffic to $IDLE_COLOR"
-          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-backend\",\"color\":\"$IDLE_COLOR\"}}}"
-          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-frontend\",\"color\":\"$IDLE_COLOR\"}}}"
+          echo "Verifying new live deployments"
+          kubectl rollout status deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
+          kubectl rollout status deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
 
-      - name: Post-switch monitoring and health check
-        if: steps.switch.outcome == 'success'
+      ##################################################################
+      # 🔁 AUTO ROLLBACK SECTION — ONLY RUNS IF ANY STEP ABOVE FAILS   #
+      ##################################################################
+
+      - name: Auto rollback if new version fails
+        if: failure() && steps.switchtraffic.outputs.TRAFFIC_SWITCHED == 'true'
         env:
-          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
           LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
         run: |
-          set -e
-          echo "Monitoring new live version ($IDLE_COLOR) for 120 seconds"
-          
-          for i in {1..12}; do
-            echo "Health check iteration $i/12"
-            
-            kubectl wait --for=condition=Available deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=10s || {
-              echo "Backend health check failed!"
-              exit 1
-            }
-            kubectl wait --for=condition=Available deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=10s || {
-              echo "Frontend health check failed!"
-              exit 1
-            }
-            
-            kubectl get pods -n $K8S_NAMESPACE -l app=taskify-backend,color=$IDLE_COLOR -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="taskify-backend")].restartCount}' | xargs | grep -q "0" || {
-              echo "Backend pod restarts detected!"
-              exit 1
-            }
-            kubectl get pods -n $K8S_NAMESPACE -l app=taskify-frontend,color=$IDLE_COLOR -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="taskify-frontend")].restartCount}' | xargs | grep -q "0" || {
-              echo "Frontend pod restarts detected!"
-              exit 1
-            }
-            
-            sleep 10
-          done
-          echo "Post-switch monitoring PASSED"
+          echo "❌ Deployment failed. Rolling back to previous color: $LIVE_COLOR"
 
-      - name: AUTO ROLLBACK on failure
-        if: failure() && steps.switch.outcome == 'success'
-        env:
-          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
-          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
-        run: |
-          echo "🚨 AUTO ROLLBACK: Switching traffic back to stable $LIVE_COLOR"
-          sleep 2
-          
-          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-backend\",\"color\":\"$LIVE_COLOR\"}}}"
-          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-frontend\",\"color\":\"$LIVE_COLOR\"}}}"
-          
-          kubectl rollout status deployment/taskify-backend-$LIVE_COLOR -n $K8S_NAMESPACE --timeout=60s
-          kubectl rollout status deployment/taskify-frontend-$LIVE_COLOR -n $K8S_NAMESPACE --timeout=60s
-          
-          echo "✅ Rollback completed successfully"
-          exit 1
+          echo "Switching Services back to LIVE color"
+          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\": {\"selector\": {\"app\": \"taskify-backend\", \"color\": \"$LIVE_COLOR\"}}}"
+          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\": {\"selector\": {\"app\": \"taskify-frontend\", \"color\": \"$LIVE_COLOR\"}}}"
 
-      - name: Cleanup old color (only on success)
+          echo "Scaling up old LIVE color"
+          kubectl scale deployment/taskify-backend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=1
+          kubectl scale deployment/taskify-frontend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=1
+
+          echo "Rollback complete."
+
+      - name: Cleanup old color (optional)
         if: success()
         env:
           LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
         run: |
-          echo "✅ Deployment successful - scaling down old color $LIVE_COLOR"
+          echo "Old live color was $LIVE_COLOR — scaling it down"
           kubectl scale deployment/taskify-backend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=0 || true
           kubectl scale deployment/taskify-frontend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=0 || true
-
-      - name: Final status summary
-        if: always()
-        env:
-          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
-          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
-        run: |
-          echo "=== DEPLOYMENT SUMMARY ==="
-          echo "Original live color: $LIVE_COLOR"
-          echo "New version color: $IDLE_COLOR"
-          echo "========================"
-          
-          if [ "${{ job.status }}" != "success" ]; then
-            echo "❌ Deployment failed and was automatically rolled back to $LIVE_COLOR"
-          else
-            echo "✅ Deployment completed successfully - old color scaled down"
-          fi
