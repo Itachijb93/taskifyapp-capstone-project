@@ -1,0 +1,175 @@
+name: CD Deploy to AKS (Blue-Green with Auto-Rollback)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      K8S_NAMESPACE: taskify
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Ensure namespace
+        run: |
+          kubectl get ns $K8S_NAMESPACE || kubectl create ns $K8S_NAMESPACE
+
+      - name: Deploy MSSQL
+        run: |
+          kubectl apply -n $K8S_NAMESPACE -f k8s/mssql.yaml
+
+      - name: Determine current live color
+        id: livecolor
+        run: |
+          CURRENT_COLOR=$(kubectl get svc taskify-frontend -n $K8S_NAMESPACE -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
+          echo "Current live color: $CURRENT_COLOR"
+          if [ "$CURRENT_COLOR" = "green" ]; then
+            echo "LIVE_COLOR=green" >> $GITHUB_OUTPUT
+            echo "IDLE_COLOR=blue" >> $GITHUB_OUTPUT
+          else
+            echo "LIVE_COLOR=blue" >> $GITHUB_OUTPUT
+            echo "IDLE_COLOR=green" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Render manifests with image tag
+        run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          export IMAGE_TAG=${IMAGE_TAG}
+          envsubst < k8s/backend-blue-green.yaml > k8s/backend-blue-green.rendered.yaml
+          envsubst < k8s/frontend-blue-green.yaml > k8s/frontend-blue-green.rendered.yaml
+
+      - name: Deploy idle color (new version)
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+        run: |
+          echo "Deploying new version to color: $IDLE_COLOR"
+          kubectl apply -n $K8S_NAMESPACE -f k8s/backend-blue-green.rendered.yaml
+          kubectl apply -n $K8S_NAMESPACE -f k8s/frontend-blue-green.rendered.yaml
+
+      - name: Wait for idle color rollout
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+        run: |
+          set -e
+          echo "Waiting for backend-$IDLE_COLOR rollout"
+          kubectl rollout status deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
+          echo "Waiting for frontend-$IDLE_COLOR rollout"
+          kubectl rollout status deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=180s
+
+      - name: Pre-switch health check
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+        run: |
+          set -e
+          echo "Running pre-switch health checks for $IDLE_COLOR"
+          kubectl wait --for=condition=Available deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=60s
+          kubectl wait --for=condition=Available deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=60s
+
+      - name: Switch traffic to new version (idle color)
+        id: switch
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+        run: |
+          echo "Switching traffic to $IDLE_COLOR"
+          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-backend\",\"color\":\"$IDLE_COLOR\"}}}"
+          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-frontend\",\"color\":\"$IDLE_COLOR\"}}}"
+
+      - name: Post-switch monitoring and health check
+        if: steps.switch.outcome == 'success'
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
+        run: |
+          set -e
+          echo "Monitoring new live version ($IDLE_COLOR) for 120 seconds"
+          
+          for i in {1..12}; do
+            echo "Health check iteration $i/12"
+            
+            kubectl wait --for=condition=Available deployment/taskify-backend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=10s || {
+              echo "Backend health check failed!"
+              exit 1
+            }
+            kubectl wait --for=condition=Available deployment/taskify-frontend-$IDLE_COLOR -n $K8S_NAMESPACE --timeout=10s || {
+              echo "Frontend health check failed!"
+              exit 1
+            }
+            
+            kubectl get pods -n $K8S_NAMESPACE -l app=taskify-backend,color=$IDLE_COLOR -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="taskify-backend")].restartCount}' | xargs | grep -q "0" || {
+              echo "Backend pod restarts detected!"
+              exit 1
+            }
+            kubectl get pods -n $K8S_NAMESPACE -l app=taskify-frontend,color=$IDLE_COLOR -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="taskify-frontend")].restartCount}' | xargs | grep -q "0" || {
+              echo "Frontend pod restarts detected!"
+              exit 1
+            }
+            
+            sleep 10
+          done
+          echo "Post-switch monitoring PASSED"
+
+      - name: AUTO ROLLBACK on failure
+        if: failure() && steps.switch.outcome == 'success'
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
+        run: |
+          echo "🚨 AUTO ROLLBACK: Switching traffic back to stable $LIVE_COLOR"
+          sleep 2
+          
+          kubectl patch svc taskify-backend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-backend\",\"color\":\"$LIVE_COLOR\"}}}"
+          kubectl patch svc taskify-frontend -n $K8S_NAMESPACE -p "{\"spec\":{\"selector\":{\"app\":\"taskify-frontend\",\"color\":\"$LIVE_COLOR\"}}}"
+          
+          kubectl rollout status deployment/taskify-backend-$LIVE_COLOR -n $K8S_NAMESPACE --timeout=60s
+          kubectl rollout status deployment/taskify-frontend-$LIVE_COLOR -n $K8S_NAMESPACE --timeout=60s
+          
+          echo "✅ Rollback completed successfully"
+          exit 1
+
+      - name: Cleanup old color (only on success)
+        if: success()
+        env:
+          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
+        run: |
+          echo "✅ Deployment successful - scaling down old color $LIVE_COLOR"
+          kubectl scale deployment/taskify-backend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=0 || true
+          kubectl scale deployment/taskify-frontend-$LIVE_COLOR -n $K8S_NAMESPACE --replicas=0 || true
+
+      - name: Final status summary
+        if: always()
+        env:
+          IDLE_COLOR: ${{ steps.livecolor.outputs.IDLE_COLOR }}
+          LIVE_COLOR: ${{ steps.livecolor.outputs.LIVE_COLOR }}
+        run: |
+          echo "=== DEPLOYMENT SUMMARY ==="
+          echo "Original live color: $LIVE_COLOR"
+          echo "New version color: $IDLE_COLOR"
+          echo "========================"
+          
+          if [ "${{ job.status }}" != "success" ]; then
+            echo "❌ Deployment failed and was automatically rolled back to $LIVE_COLOR"
+          else
+            echo "✅ Deployment completed successfully - old color scaled down"
+          fi
