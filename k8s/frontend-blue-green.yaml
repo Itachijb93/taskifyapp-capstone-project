@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: myregtf.azurecr.io/taskify-frontend:${IMAGE_TAG}
+          image: myacr13.azurecr.io/taskify-frontend:${IMAGE_TAG}
           ports:
             - containerPort: 80
           env:
@@ -55,7 +55,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: myregtf.azurecr.io/taskify-frontend:${IMAGE_TAG}
+          image: myacr13.azurecr.io/taskify-frontend:${IMAGE_TAG}
           ports:
             - containerPort: 80
           env:

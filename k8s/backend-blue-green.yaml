@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: myregtf.azurecr.io/taskify-backend:${IMAGE_TAG}
+          image: myacr13.azurecr.io/taskify-backend:${IMAGE_TAG}
           ports:
             - containerPort: 5000
           env:
@@ -68,7 +68,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: myregtf.azurecr.io/taskify-backend:${IMAGE_TAG}
+          image: myacr13.azurecr.io/taskify-backend:${IMAGE_TAG}
           ports:
             - containerPort: 5000
           env:
