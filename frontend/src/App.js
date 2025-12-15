@@ -3,9 +3,8 @@ import axios from 'axios';
 import TaskList from './components/TaskList';
 import './App.css';
 
-
-// This should match the secret you add in GitHub Actions: REACT_APP_API_URL
-const API_URL = process.env.REACT_APP_API_URL || 'http://taskify-backend.taskify.svc.cluster.local:5000';
+// Use same-origin so Nginx proxies /api → backend
+const API_URL = process.env.REACT_APP_API_URL || '';
 
 function App() {
   const [tasks, setTasks] = useState([]);
@@ -20,7 +19,7 @@ function App() {
   const fetchTasks = async () => {
     try {
       setLoading(true);
-      const response = await axios.get(`${API_URL}/tasks`);
+      const response = await axios.get(`${API_URL}/api/tasks`);
       setTasks(response.data);
       setError(null);
     } catch (err) {
@@ -35,7 +34,7 @@ function App() {
     if (!newTask.trim()) return;
 
     try {
-      const response = await axios.post(`${API_URL}/tasks`, {
+      const response = await axios.post(`${API_URL}/api/tasks`, {
         title: newTask.trim()
       });
       setTasks([response.data, ...tasks]);
@@ -48,7 +47,7 @@ function App() {
 
   const updateTask = async (id, updates) => {
     try {
-      const response = await axios.put(`${API_URL}/tasks/${id}`, updates);
+      const response = await axios.put(`${API_URL}/api/tasks/${id}`, updates);
       setTasks(tasks.map(task =>
         task.id === id ? response.data : task
       ));
@@ -60,7 +59,7 @@ function App() {
 
   const deleteTask = async (id) => {
     try {
-      await axios.delete(`${API_URL}/tasks/${id}`);
+      await axios.delete(`${API_URL}/api/tasks/${id}`);
       setTasks(tasks.filter(task => task.id !== id));
     } catch (err) {
       console.error('Failed to delete task:', err);
