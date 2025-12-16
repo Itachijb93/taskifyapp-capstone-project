@@ -31,7 +31,6 @@ jobs:
       - name: Build frontend image
         run: |
           docker build \
-            --build-arg REACT_APP_API_URL=${{ secrets.REACT_APP_API_URL }} \
             -t $ACR_LOGIN_SERVER/taskify-frontend:${{ github.sha }} \
             ./frontend
 
